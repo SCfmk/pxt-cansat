@@ -17,7 +17,7 @@ namespace cansat {
     let _fixedMode = false
 
     // Cache of last known config payload (5 bytes): ADDH, ADDL, CHAN, SPED, OPTION
-    let _lastCfg: Uint8Array = null
+    let _lastCfg: Buffer = null
 
     // Status
     let _lastError = ""
@@ -207,7 +207,12 @@ namespace cansat {
                 ch = _lastCfg[2]
             }
 
-            serial.writeBuffer(Uint8Array.fromArray([addh, addl, ch]))
+            const hdr = pins.createBuffer(3)
+            hdr[0] = addh
+            hdr[1] = addl
+            hdr[2] = ch
+            serial.writeBuffer(hdr)
+
             serial.writeString(msg)
         } else {
             serial.writeString(msg)
@@ -223,7 +228,13 @@ namespace cansat {
     export function sendFixed(addh: number, addl: number, ch: number, msg: string): void {
         ensureInit()
         if (_useLineMode) msg = msg + "\n"
-        serial.writeBuffer(Uint8Array.fromArray([addh & 0xff, addl & 0xff, ch & 0xff]))
+
+        const hdr = pins.createBuffer(3)
+        hdr[0] = addh & 0xff
+        hdr[1] = addl & 0xff
+        hdr[2] = ch & 0xff
+        serial.writeBuffer(hdr)
+
         serial.writeString(msg)
     }
 
@@ -250,7 +261,6 @@ namespace cansat {
         _cfgOk = false
 
         if (!enterConfigMode()) {
-            // _lastError already set
             exitConfigMode()
             return
         }
@@ -259,7 +269,9 @@ namespace cansat {
         serial.readString()
 
         // Read parameters: C1 C1 C1
-        serial.writeBuffer(Uint8Array.fromArray([0xC1, 0xC1, 0xC1]))
+        const cmd = pins.createBuffer(3)
+        cmd[0] = 0xC1; cmd[1] = 0xC1; cmd[2] = 0xC1
+        serial.writeBuffer(cmd)
 
         if (!waitAuxHigh(2000)) {
             _lastError = "Timeout waiting AUX after read cmd"
@@ -277,7 +289,8 @@ namespace cansat {
 
         // Typical response: 0xC0 + 5 bytes
         if (resp[0] == 0xC0 && resp.length >= 6) {
-            _lastCfg = resp.slice(1, 6)
+            _lastCfg = pins.createBuffer(5)
+            for (let i = 0; i < 5; i++) _lastCfg[i] = resp[i + 1]
             _cfgOk = true
             return
         }
@@ -316,15 +329,13 @@ namespace cansat {
         }
 
         // Write & save: C0 + 5 bytes
-        const frame = Uint8Array.fromArray([
-            0xC0,
-            addh & 0xff,
-            addl & 0xff,
-            ch & 0xff,
-            sped & 0xff,
-            option & 0xff
-        ])
-
+        const frame = pins.createBuffer(6)
+        frame[0] = 0xC0
+        frame[1] = addh & 0xff
+        frame[2] = addl & 0xff
+        frame[3] = ch & 0xff
+        frame[4] = sped & 0xff
+        frame[5] = option & 0xff
         serial.writeBuffer(frame)
 
         if (!waitAuxHigh(2500)) {
@@ -337,7 +348,12 @@ namespace cansat {
         exitConfigMode()
 
         // Cache what we attempted
-        _lastCfg = Uint8Array.fromArray([addh & 0xff, addl & 0xff, ch & 0xff, sped & 0xff, option & 0xff])
+        _lastCfg = pins.createBuffer(5)
+        _lastCfg[0] = addh & 0xff
+        _lastCfg[1] = addl & 0xff
+        _lastCfg[2] = ch & 0xff
+        _lastCfg[3] = sped & 0xff
+        _lastCfg[4] = option & 0xff
 
         // If echo looks plausible, mark OK
         if (echo && echo.length >= 6 && (echo[0] == 0xC0 || echo[0] == 0xC2)) {
@@ -401,7 +417,7 @@ namespace cansat {
             return false
         }
 
-        // In config mode many E32 variants use 9600 8N1 for config interface
+        // Config interface commonly uses 9600 8N1
         serial.redirect(LORA_TX, LORA_RX, BaudRate.BaudRate9600)
         return true
     }
@@ -420,32 +436,35 @@ namespace cansat {
         return false
     }
 
-    function readBytesWithTimeout(n: number, timeoutMs: number): Uint8Array {
+    function readBytesWithTimeout(n: number, timeoutMs: number): Buffer {
         const start = control.millis()
         let buf = pins.createBuffer(0)
 
         while (control.millis() - start < timeoutMs && buf.length < n) {
             const b = serial.readBuffer(n - buf.length)
             if (b && b.length > 0) {
-                const nb = pins.createBuffer(buf.length + b.length)
-                for (let i = 0; i < buf.length; i++) nb[i] = buf[i]
-                for (let j = 0; j < b.length; j++) nb[buf.length + j] = b[j]
-                buf = nb
+                buf = bufferConcat(buf, b)
             } else {
                 basic.pause(10)
             }
         }
 
         if (buf.length == 0) return null
-        return Uint8Array.fromArray(buf.toArray(NumberFormat.UInt8LE))
+        return buf
+    }
+
+    function bufferConcat(a: Buffer, b: Buffer): Buffer {
+        const out = pins.createBuffer(a.length + b.length)
+        for (let i = 0; i < a.length; i++) out[i] = a[i]
+        for (let j = 0; j < b.length; j++) out[a.length + j] = b[j]
+        return out
     }
 
     function setupReceiver(): void {
         if (!_rxHandler) return
 
-        // IMPORTANT: serial.onDataReceived handlers stack in MakeCode.
-        // In a production extension you'd want a more careful strategy,
-        // but this is fine for typical usage where you set it once.
+        // NOTE: serial.onDataReceived handlers stack in MakeCode if you call this repeatedly.
+        // Typical usage is: call onReceiveString once, so it's fine.
 
         if (_useLineMode) {
             serial.onDataReceived(serial.delimiters(Delimiters.NewLine), function () {
@@ -453,8 +472,7 @@ namespace cansat {
                 _rxHandler(s)
             })
         } else {
-            // If not using newline framing, we still need *some* delimiter to trigger.
-            // Comma is a placeholder; many people keep line mode on.
+            // If not using newline framing, we still need a delimiter to trigger.
             serial.onDataReceived(serial.delimiters(Delimiters.Comma), function () {
                 const s = serial.readString()
                 _rxHandler(s)
