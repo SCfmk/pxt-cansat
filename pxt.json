@@ -1,0 +1,14 @@
+{
+  "name": "Can:Sat",
+  "version": "0.0.1",
+  "description": "Can:Sat LoRa helper for EByte E32 (hardwired pins, AUX-safe config for v1.2)",
+  "dependencies": {
+    "core": "*",
+    "microbit": "*"
+  },
+  "files": [
+    "main.ts",
+    "README.md"
+  ],
+  "public": true
+}
