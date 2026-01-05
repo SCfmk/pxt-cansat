@@ -13,10 +13,15 @@ namespace cansat {
     // ----- Internal state -----
     let _inited = false
     let _rxHandler: (msg: string) => void = null
-    let _useLineMode = true      // receive/send strings as "lines"
-    let _fixedMode = false       // fixed vs transparent sending
+    let _useLineMode = true
+    let _fixedMode = false
+
+    // Cache of last known config payload (5 bytes): ADDH, ADDL, CHAN, SPED, OPTION
     let _lastCfg: Uint8Array = null
+
+    // Status
     let _lastError = ""
+    let _cfgOk = false
 
     // ----- Public enums for blocks -----
     export enum TxMode {
@@ -27,7 +32,6 @@ namespace cansat {
     }
 
     export enum Power {
-        // Typical E32 power steps (exact mapping can differ by model)
         //% block="20 dBm (max)"
         P20dBm = 0,
         //% block="17 dBm"
@@ -39,7 +43,6 @@ namespace cansat {
     }
 
     export enum AirDataRate {
-        // A common set used by E32 modules (depends on model/firmware)
         //% block="0.3 kbps"
         ADR_0_3K = 0,
         //% block="1.2 kbps"
@@ -96,11 +99,10 @@ namespace cansat {
         pins.digitalWritePin(PIN_M1, 0)
         pins.setPull(PIN_AUX, PinPullMode.PullUp)
 
-        // E32 config interface is typically 9600 8N1 in config mode; normal mode can be higher,
-        // but keep 9600 for reliability unless you need more.
+        // Default to LoRa serial at 9600 for reliability
         serial.redirect(LORA_TX, LORA_RX, BaudRate.BaudRate9600)
 
-        // Give the module a moment after power-up
+        // Let the module settle after power-up
         basic.pause(100)
         waitAuxHigh(2000)
 
@@ -109,6 +111,7 @@ namespace cansat {
 
         _inited = true
         _lastError = ""
+        _cfgOk = true
     }
 
     /**
@@ -149,6 +152,15 @@ namespace cansat {
         return _lastError
     }
 
+    /**
+     * Was the last config operation ok?
+     */
+    //% block="config ok?"
+    //% weight=28
+    export function configOk(): boolean {
+        return _cfgOk
+    }
+
     // ----- Blocks: Serial routing -----
 
     /**
@@ -162,19 +174,18 @@ namespace cansat {
     }
 
     /**
-     * Route serial to USB (useful for debugging).
+     * Route serial to USB (useful for debugging prints).
      */
     //% block="serial to USB"
     //% weight=69
     export function serialToUSB(): void {
         serial.redirectToUSB()
-        // no receiver hook here; this is for printing
     }
 
     // ----- Blocks: Send / receive -----
 
     /**
-     * Send a string. In fixed mode, will prepend address+channel header.
+     * Send a string. In fixed mode, will prepend cached address+channel header if available.
      * In transparent mode, sends as-is.
      */
     //% block="send string %msg"
@@ -182,18 +193,15 @@ namespace cansat {
     export function sendString(msg: string): void {
         ensureInit()
 
-        // In line mode, append newline to make receive easier.
         if (_useLineMode) msg = msg + "\n"
 
         if (_fixedMode) {
-            // In fixed mode, we need ADDH, ADDL, CHAN header.
-            // We'll use the *currently configured* address+channel if we have it,
-            // otherwise default 0x00 0x00 and channel 0x17.
+            // In fixed mode, header = ADDH, ADDL, CHAN
             let addh = 0x00
             let addl = 0x00
             let ch = 0x17
 
-            if (_lastCfg && _lastCfg.length >= 6) {
+            if (_lastCfg && _lastCfg.length >= 3) {
                 addh = _lastCfg[0]
                 addl = _lastCfg[1]
                 ch = _lastCfg[2]
@@ -236,108 +244,112 @@ namespace cansat {
      */
     //% block="read config"
     //% weight=50
-    export function readConfig(): boolean {
+    export function readConfig(): void {
         ensureInit()
         _lastError = ""
+        _cfgOk = false
 
-        if (!enterConfigMode()) return false
+        if (!enterConfigMode()) {
+            // _lastError already set
+            exitConfigMode()
+            return
+        }
 
         // Clear input buffer
         serial.readString()
 
         // Read parameters: C1 C1 C1
         serial.writeBuffer(Uint8Array.fromArray([0xC1, 0xC1, 0xC1]))
+
         if (!waitAuxHigh(2000)) {
             _lastError = "Timeout waiting AUX after read cmd"
             exitConfigMode()
-            return false
+            return
         }
 
-        const resp = readBytesWithTimeout(6, 500) // typical response length for parameters
+        const resp = readBytesWithTimeout(6, 700)
         exitConfigMode()
 
         if (!resp || resp.length < 6) {
             _lastError = "No/short config response"
-            return false
+            return
         }
 
-        // Some modules respond with 0xC0 + 5 bytes
+        // Typical response: 0xC0 + 5 bytes
         if (resp[0] == 0xC0 && resp.length >= 6) {
-            _lastCfg = resp.slice(1, 6) // store 5 bytes: ADDH ADDL CH SPED OPTION
-            return true
+            _lastCfg = resp.slice(1, 6)
+            _cfgOk = true
+            return
         }
 
-        // Some firmware variants may respond differently; keep raw for debugging
         _lastError = "Unexpected config header: " + resp[0]
-        return false
     }
 
-    let _cfgOk = false
+    /**
+     * Apply common config settings (address, channel, power, etc.) and SAVE to module.
+     *
+     * Uses classic E32 5-byte parameter frame: ADDH, ADDL, CHAN, SPED, OPTION.
+     */
+    //% block="apply config ADDH %addh ADDL %addl channel %ch power %p uart %uart parity %parity air %air tx mode %mode"
+    //% addh.min=0 addh.max=255 addl.min=0 addl.max=255 ch.min=0 ch.max=255
+    //% weight=49
+    export function applyConfig(addh: number, addl: number, ch: number, p: Power, uart: UartBaud, parity: Parity, air: AirDataRate, mode: TxMode): void {
+        ensureInit()
+        _lastError = ""
+        _cfgOk = false
 
-/**
- * Apply common config settings (address, channel, power, etc.) and SAVE to module.
- */
-//% block="apply config ADDH %addh ADDL %addl channel %ch power %p uart %uart parity %parity air %air tx mode %fixed"
-//% addh.min=0 addh.max=255 addl.min=0 addl.max=255 ch.min=0 ch.max=255
-//% weight=49
-export function applyConfig(addh: number, addl: number, ch: number, p: Power, uart: UartBaud, parity: Parity, air: AirDataRate, fixed: TxMode): void {
-    ensureInit()
-    _lastError = ""
-    _cfgOk = false
+        // SPED byte:
+        // bits 7..6: parity, bits 5..3: UART baud, bits 2..0: air data rate
+        const sped = ((parity & 0x03) << 6) | ((uart & 0x07) << 3) | (air & 0x07)
 
-    const sped = ((parity & 0x03) << 6) | ((uart & 0x07) << 3) | (air & 0x07)
+        // OPTION byte (mapping can vary by model/firmware).
+        // We implement a common layout:
+        // - bits 1..0: power
+        // - bit 2: fixed transmission enable
+        let option = 0x00
+        option |= (p & 0x03)
+        if (mode == TxMode.Fixed) option |= (1 << 2)
 
-    let option = 0x00
-    option |= (p & 0x03)             // power bits (common mapping)
-    if (fixed == TxMode.Fixed) option |= (1 << 2)  // fixed-enable (common mapping)
+        if (!enterConfigMode()) {
+            exitConfigMode()
+            return
+        }
 
-    if (!enterConfigMode()) {
-        _lastError = _lastError || "Failed to enter config mode"
+        // Write & save: C0 + 5 bytes
+        const frame = Uint8Array.fromArray([
+            0xC0,
+            addh & 0xff,
+            addl & 0xff,
+            ch & 0xff,
+            sped & 0xff,
+            option & 0xff
+        ])
+
+        serial.writeBuffer(frame)
+
+        if (!waitAuxHigh(2500)) {
+            _lastError = "Timeout waiting AUX after write"
+            exitConfigMode()
+            return
+        }
+
+        const echo = readBytesWithTimeout(6, 700)
         exitConfigMode()
-        return
-    }
 
-    const frame = Uint8Array.fromArray([
-        0xC0,
-        addh & 0xff,
-        addl & 0xff,
-        ch & 0xff,
-        sped & 0xff,
-        option & 0xff
-    ])
+        // Cache what we attempted
+        _lastCfg = Uint8Array.fromArray([addh & 0xff, addl & 0xff, ch & 0xff, sped & 0xff, option & 0xff])
 
-    serial.writeBuffer(frame)
+        // If echo looks plausible, mark OK
+        if (echo && echo.length >= 6 && (echo[0] == 0xC0 || echo[0] == 0xC2)) {
+            _cfgOk = true
+            return
+        }
 
-    if (!waitAuxHigh(2500)) {
-        _lastError = "Timeout waiting AUX after write"
-        exitConfigMode()
-        return
-    }
-
-    const echo = readBytesWithTimeout(6, 700)
-    exitConfigMode()
-
-    _lastCfg = Uint8Array.fromArray([addh & 0xff, addl & 0xff, ch & 0xff, sped & 0xff, option & 0xff])
-
-    // If we got a plausible echo, great.
-    if (echo && echo.length >= 6 && (echo[0] == 0xC0 || echo[0] == 0xC2)) {
+        // Some modules don't echo reliably; still treat as OK but leave an informative message.
         _cfgOk = true
-        return
+        _lastError = "No/odd echo (may still be ok)"
     }
 
-    // Many modules are flaky about echo; treat as "likely OK" but report.
-    _cfgOk = true
-    _lastError = "No/odd echo (may still be ok)"
-}
-
-/**
- * Was the last apply/read config operation successful?
- */
-//% block="config ok?"
- //% weight=28
-export function configOk(): boolean {
-    return _cfgOk
-}
     /**
      * Get cached address high byte (0 if unknown).
      */
@@ -383,12 +395,13 @@ export function configOk(): boolean {
         pins.digitalWritePin(PIN_M0, 1)
         pins.digitalWritePin(PIN_M1, 1)
         basic.pause(40)
+
         if (!waitAuxHigh(2500)) {
             _lastError = "Timeout entering config mode (AUX)"
             return false
         }
 
-        // In config mode, UART settings are typically 9600 8N1 regardless of normal mode
+        // In config mode many E32 variants use 9600 8N1 for config interface
         serial.redirect(LORA_TX, LORA_RX, BaudRate.BaudRate9600)
         return true
     }
@@ -414,7 +427,6 @@ export function configOk(): boolean {
         while (control.millis() - start < timeoutMs && buf.length < n) {
             const b = serial.readBuffer(n - buf.length)
             if (b && b.length > 0) {
-                // concat
                 const nb = pins.createBuffer(buf.length + b.length)
                 for (let i = 0; i < buf.length; i++) nb[i] = buf[i]
                 for (let j = 0; j < b.length; j++) nb[buf.length + j] = b[j]
@@ -429,17 +441,20 @@ export function configOk(): boolean {
     }
 
     function setupReceiver(): void {
-        // We redirect serial in init() and other functions; rebind handler accordingly.
         if (!_rxHandler) return
+
+        // IMPORTANT: serial.onDataReceived handlers stack in MakeCode.
+        // In a production extension you'd want a more careful strategy,
+        // but this is fine for typical usage where you set it once.
 
         if (_useLineMode) {
             serial.onDataReceived(serial.delimiters(Delimiters.NewLine), function () {
                 const s = serial.readString()
-                // readString includes everything up to delimiter (delimiter removed)
                 _rxHandler(s)
             })
         } else {
-            // Fallback: call handler when any data arrives (user must parse)
+            // If not using newline framing, we still need *some* delimiter to trigger.
+            // Comma is a placeholder; many people keep line mode on.
             serial.onDataReceived(serial.delimiters(Delimiters.Comma), function () {
                 const s = serial.readString()
                 _rxHandler(s)
