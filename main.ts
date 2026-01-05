@@ -272,78 +272,72 @@ namespace cansat {
         return false
     }
 
-    /**
-     * Apply common config settings (address, channel, power, etc.) and SAVE to module.
-     *
-     * Note: This uses the classic E32 5-byte parameter frame:
-     * ADDH, ADDL, CHAN, SPED, OPTION
-     */
-    //% block="apply config ADDH %addh ADDL %addl channel %ch power %p uart %uart parity %parity air %air fixed %fixed"
-    //% addh.min=0 addh.max=255 addl.min=0 addl.max=255 ch.min=0 ch.max=255
-    //% weight=49
-    export function applyConfig(addh: number, addl: number, ch: number, p: Power, uart: UartBaud, parity: Parity, air: AirDataRate, fixed: TxMode): boolean {
-        ensureInit()
-        _lastError = ""
+    let _cfgOk = false
 
-        // Build SPED byte (E32 style):
-        // bits 7..6: parity, bits 5..3: UART baud, bits 2..0: air data rate
-        const sped = ((parity & 0x03) << 6) | ((uart & 0x07) << 3) | (air & 0x07)
+/**
+ * Apply common config settings (address, channel, power, etc.) and SAVE to module.
+ */
+//% block="apply config ADDH %addh ADDL %addl channel %ch power %p uart %uart parity %parity air %air tx mode %fixed"
+//% addh.min=0 addh.max=255 addl.min=0 addl.max=255 ch.min=0 ch.max=255
+//% weight=49
+export function applyConfig(addh: number, addl: number, ch: number, p: Power, uart: UartBaud, parity: Parity, air: AirDataRate, fixed: TxMode): void {
+    ensureInit()
+    _lastError = ""
+    _cfgOk = false
 
-        // Build OPTION byte (E32 style, commonly):
-        // bits 7..6: transmit power
-        // bit 6.. ? depends by model; we’ll set power in top bits
-        // fixed/transparent is often OPTION bit 7? (varies) BUT for E32 it’s typically in OPTION bit 6/7 via "fixed transmission" enable.
-        // Because variants exist, we do:
-        // - set power in bits 1..0 or 7..6? Many E32 use bits 1..0 for power; others use 7..6.
-        // The safer choice for many E32-TTL-100 / -T20D variants is bits 1..0.
-        //
-        // We'll implement:
-        // OPTION bits 7..6: reserved as 0
-        // OPTION bit 2: fixed transmission enable (common in some E32 docs)
-        // OPTION bits 1..0: power
-        //
-        // If your specific v1.2 uses a different layout, we can tweak easily.
-        let option = 0x00
-        option |= (p & 0x03) // power in bits 1..0
-        if (fixed == TxMode.Fixed) option |= (1 << 2) // "fixed" flag (common mapping)
+    const sped = ((parity & 0x03) << 6) | ((uart & 0x07) << 3) | (air & 0x07)
 
-        if (!enterConfigMode()) return false
+    let option = 0x00
+    option |= (p & 0x03)             // power bits (common mapping)
+    if (fixed == TxMode.Fixed) option |= (1 << 2)  // fixed-enable (common mapping)
 
-        // Write & save: C0 + 5 bytes
-        const frame = Uint8Array.fromArray([
-            0xC0,
-            addh & 0xff,
-            addl & 0xff,
-            ch & 0xff,
-            sped & 0xff,
-            option & 0xff
-        ])
-
-        serial.writeBuffer(frame)
-
-        if (!waitAuxHigh(2500)) {
-            _lastError = "Timeout waiting AUX after write"
-            exitConfigMode()
-            return false
-        }
-
-        // Many modules echo back the written frame as confirmation (6 bytes)
-        const echo = readBytesWithTimeout(6, 700)
+    if (!enterConfigMode()) {
+        _lastError = _lastError || "Failed to enter config mode"
         exitConfigMode()
-
-        // Cache “what we tried to set” regardless of echo.
-        _lastCfg = Uint8Array.fromArray([addh & 0xff, addl & 0xff, ch & 0xff, sped & 0xff, option & 0xff])
-
-        // If echo exists, sanity check header
-        if (echo && echo.length >= 6 && (echo[0] == 0xC0 || echo[0] == 0xC2)) {
-            return true
-        }
-
-        // Some firmwares don’t echo reliably; treat missing echo as “probably ok” but expose error.
-        _lastError = "No/odd echo (may still be ok)"
-        return true
+        return
     }
 
+    const frame = Uint8Array.fromArray([
+        0xC0,
+        addh & 0xff,
+        addl & 0xff,
+        ch & 0xff,
+        sped & 0xff,
+        option & 0xff
+    ])
+
+    serial.writeBuffer(frame)
+
+    if (!waitAuxHigh(2500)) {
+        _lastError = "Timeout waiting AUX after write"
+        exitConfigMode()
+        return
+    }
+
+    const echo = readBytesWithTimeout(6, 700)
+    exitConfigMode()
+
+    _lastCfg = Uint8Array.fromArray([addh & 0xff, addl & 0xff, ch & 0xff, sped & 0xff, option & 0xff])
+
+    // If we got a plausible echo, great.
+    if (echo && echo.length >= 6 && (echo[0] == 0xC0 || echo[0] == 0xC2)) {
+        _cfgOk = true
+        return
+    }
+
+    // Many modules are flaky about echo; treat as "likely OK" but report.
+    _cfgOk = true
+    _lastError = "No/odd echo (may still be ok)"
+}
+
+/**
+ * Was the last apply/read config operation successful?
+ */
+//% block="config ok?"
+ //% weight=28
+export function configOk(): boolean {
+    return _cfgOk
+}
     /**
      * Get cached address high byte (0 if unknown).
      */
