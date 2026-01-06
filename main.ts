@@ -79,7 +79,7 @@ namespace cansat {
     const PIN_M1 = DigitalPin.P8
     const PIN_AUX = DigitalPin.P16
 
-    // NOTE: Swapped to match your PCB wiring
+    // NOTE: swapped to match your PCB wiring
     const LORA_TX = SerialPin.P15
     const LORA_RX = SerialPin.P14
 
@@ -94,18 +94,19 @@ namespace cansat {
     let _fixedMode = false
     let _useLineMode = true
 
-    // Cache of last known config payload (5 bytes): ADDH, ADDL, CHAN, SPED, OPTION
+    /**
+     * Last config cache is stored in E32 order:
+     * [0]=ADDH, [1]=ADDL, [2]=SPED, [3]=CHAN, [4]=OPTION
+     */
     let _lastCfg: Buffer = null
 
-    // Track last UART setting so we keep serial.redirect consistent in normal mode
     let _currentUart: UartBaud = UartBaud.B9600
 
-    // Status
     let _lastError = ""
     let _cfgOk = false
 
     // ---------------------------------------------------------------------
-    // Public blocks (NOT Advanced): init, config, send/receive, tx mode, serial switching
+    // Public blocks
     // ---------------------------------------------------------------------
 
     //% block="Can:Sat init"
@@ -144,8 +145,12 @@ namespace cansat {
         _lastError = ""
         _cfgOk = false
 
+        // SPED byte: parity (7..6), uart (5..3), air (2..0)
         const sped = ((parity & 0x03) << 6) | ((uart & 0x07) << 3) | (air & 0x07)
 
+        // OPTION byte (common mapping):
+        // bits 1..0: power
+        // bit 2: fixed transmission enable
         let option = 0x00
         option |= (p & 0x03)
         if (mode == TxMode.Fixed) option |= (1 << 2)
@@ -157,12 +162,13 @@ namespace cansat {
             return
         }
 
+        // IMPORTANT: E32 order is ADDH, ADDL, SPED, CHAN, OPTION
         const frame = pins.createBuffer(6)
         frame[0] = 0xC0
         frame[1] = addh & 0xff
         frame[2] = addl & 0xff
-        frame[3] = ch & 0xff
-        frame[4] = sped & 0xff
+        frame[3] = sped & 0xff
+        frame[4] = ch & 0xff
         frame[5] = option & 0xff
         serial.writeBuffer(frame)
 
@@ -173,7 +179,7 @@ namespace cansat {
             return
         }
 
-        // Verify by reading parameters back (more reliable than echo)
+        // Readback parameters to verify
         const readback = readParamsWhileInConfigMode()
         exitConfigMode()
 
@@ -235,13 +241,14 @@ namespace cansat {
         if (_useLineMode) msg = msg + "\n"
 
         if (_fixedMode) {
+            // header = DEST_ADDH, DEST_ADDL, DEST_CHAN
             let addh = 0x00
             let addl = 0x00
             let ch = 0x17
-            if (_lastCfg && _lastCfg.length >= 3) {
+            if (_lastCfg && _lastCfg.length >= 4) {
                 addh = _lastCfg[0]
                 addl = _lastCfg[1]
-                ch = _lastCfg[2]
+                ch = _lastCfg[3] // CHAN is index 3
             }
 
             const hdr = pins.createBuffer(3)
@@ -311,7 +318,7 @@ namespace cansat {
     //% block="config channel"
     //% advanced=true
     export function cfgChannel(): number {
-        return (_lastCfg && _lastCfg.length >= 3) ? _lastCfg[2] : 0
+        return (_lastCfg && _lastCfg.length >= 4) ? _lastCfg[3] : 0
     }
 
     //% block="AUX is high"
@@ -345,7 +352,6 @@ namespace cansat {
     // ---------------------------------------------------------------------
 
     function finishFailSafe(): void {
-        // Guarantee a non-empty error whenever configOk is false.
         if (!_cfgOk && _lastError == "") {
             _lastError = "Failed"
         }
@@ -392,7 +398,7 @@ namespace cansat {
     }
 
     function readParamsWhileInConfigMode(): Buffer {
-        // Clear any pending input (can be empty)
+        // Clear any pending input
         serial.readString()
 
         const cmd = pins.createBuffer(3)
