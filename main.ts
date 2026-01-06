@@ -3,31 +3,7 @@
  */
 //% color=#7C3AED icon="\uf135" block="Can:Sat"
 namespace cansat {
-    // ----- Hardwired pins for this project -----
-    const PIN_M0 = DigitalPin.P9
-    const PIN_M1 = DigitalPin.P8
-    const PIN_AUX = DigitalPin.P16
-    const LORA_TX = SerialPin.P14
-    const LORA_RX = SerialPin.P15
-
-    // ----- Internal state -----
-    let _inited = false
-    let _rxHandler: (msg: string) => void = null
-    let _fixedMode = false
-    let _useLineMode = true
-    let UartBaud = UartBaud.B9600
-
-    // Cache of last known config payload (5 bytes): ADDH, ADDL, CHAN, SPED, OPTION
-    let _lastCfg: Buffer = null
-
-    // Track last UART setting so we can keep serial.redirect consistent in normal mode
-    let _currentUart: UartBaud = UartBaud.B9600
-
-    // Status
-    let _lastError = ""
-    let _cfgOk = false
-
-    // ----- Public enums for blocks -----
+     // ----- Public enums for blocks -----
 
     export enum TxMode {
         //% block="transparent"
@@ -91,6 +67,29 @@ namespace cansat {
         //% block="8E1 (even)"
         Even = 2
     }
+    // ----- Hardwired pins for this project -----
+    const PIN_M0 = DigitalPin.P9
+    const PIN_M1 = DigitalPin.P8
+    const PIN_AUX = DigitalPin.P16
+    const LORA_TX = SerialPin.P14
+    const LORA_RX = SerialPin.P15
+
+    // ----- Internal state -----
+    let _inited = false
+    let _rxHandler: (msg: string) => void = null
+    let _fixedMode = false
+    let _useLineMode = true
+    let UartBaud = UartBaud.B9600
+
+    // Cache of last known config payload (5 bytes): ADDH, ADDL, CHAN, SPED, OPTION
+    let _lastCfg: Buffer = null
+
+    // Track last UART setting so we can keep serial.redirect consistent in normal mode
+
+    // Status
+    let _lastError = ""
+    let _cfgOk = false
+
 
     // ----- Blocks (NOT in More/Advanced): init, configure, send, receive, tx mode, serial switching -----
 
