@@ -102,13 +102,14 @@ namespace cansat {
     let _lastError = ""
     let _cfgOk = false
 
+    // Debug stage (helps pinpoint where it fails)
+    // 0 = idle, 10+ = applyConfig stages, 20+ = readConfig stages
+    let _stage = 0
+
     // ---------------------------------------------------------------------
     // Public blocks (NOT Advanced): init, config, send/receive, tx mode, serial switching
     // ---------------------------------------------------------------------
 
-    /**
-     * Initialize Can:Sat LoRa module (sets pins, redirects serial, sets normal mode).
-     */
     //% block="Can:Sat init"
     //% weight=100
     export function init(): void {
@@ -121,7 +122,6 @@ namespace cansat {
         _currentUart = UartBaud.B9600
         serial.redirect(LORA_TX, LORA_RX, baudRateFromUart(_currentUart))
 
-        // Let module settle after power-up
         basic.pause(200)
         waitAuxHigh(4000)
 
@@ -131,11 +131,9 @@ namespace cansat {
         _inited = true
         _lastError = ""
         _cfgOk = true
+        _stage = 0
     }
 
-    /**
-     * Apply common config settings (address, channel, power, etc.) and SAVE to module.
-     */
     //% block="apply config ADDH %addh ADDL %addl channel %ch power %p uart %uart parity %parity air %air tx mode %mode"
     //% addh.min=0 addh.max=255 addl.min=0 addl.max=255 ch.min=0 ch.max=255
     //% uart.defl=cansat.UartBaud.B9600
@@ -148,23 +146,23 @@ namespace cansat {
         ensureInit()
         _lastError = ""
         _cfgOk = false
+        _stage = 10
 
         const sped = ((parity & 0x03) << 6) | ((uart & 0x07) << 3) | (air & 0x07)
 
-        // OPTION byte mapping (common):
-        // bits 1..0: power
-        // bit 2: fixed transmission enable
         let option = 0x00
         option |= (p & 0x03)
         if (mode == TxMode.Fixed) option |= (1 << 2)
 
+        _stage = 11
         if (!enterConfigMode()) {
-            if (_lastError == "") _lastError = "Failed to enter config mode"
+            if (_lastError == "") _lastError = "applyConfig: enter config mode failed"
             exitConfigMode()
+            finishFailSafe()
             return
         }
 
-        // Write & save: C0 + 5 bytes
+        _stage = 12
         const frame = pins.createBuffer(6)
         frame[0] = 0xC0
         frame[1] = addh & 0xff
@@ -174,13 +172,16 @@ namespace cansat {
         frame[5] = option & 0xff
         serial.writeBuffer(frame)
 
+        _stage = 13
         if (!waitAuxHigh(4000)) {
-            _lastError = "Timeout waiting AUX after write"
+            _lastError = "applyConfig: AUX timeout after write"
             exitConfigMode()
+            finishFailSafe()
             return
         }
 
         // Verify by reading parameters back (more reliable than echo)
+        _stage = 14
         const readback = readParamsWhileInConfigMode()
         exitConfigMode()
 
@@ -191,34 +192,39 @@ namespace cansat {
             _cfgOk = true
             _currentUart = uart
             serial.redirect(LORA_TX, LORA_RX, baudRateFromUart(_currentUart))
+            _stage = 0
             return
         }
 
         _cfgOk = false
-        if (_lastError == "") _lastError = "Config write ok? but no readback"
+        if (_lastError == "") _lastError = "applyConfig: write done but no readback"
+        finishFailSafe()
     }
 
-    /**
-     * Read module configuration and cache it.
-     */
     //% block="read config"
     //% weight=59
     export function readConfig(): void {
         ensureInit()
         _lastError = ""
         _cfgOk = false
+        _stage = 20
 
+        _stage = 21
         if (!enterConfigMode()) {
-            if (_lastError == "") _lastError = "Failed to enter config mode"
+            if (_lastError == "") _lastError = "readConfig: enter config mode failed"
             exitConfigMode()
+            finishFailSafe()
             return
         }
 
+        _stage = 22
         const resp = readParamsWhileInConfigMode()
         exitConfigMode()
 
+        _stage = 23
         if (!resp || resp.length < 6) {
-            _lastError = "No/short config response"
+            if (_lastError == "") _lastError = "readConfig: no/short response"
+            finishFailSafe()
             return
         }
 
@@ -226,15 +232,15 @@ namespace cansat {
             _lastCfg = pins.createBuffer(5)
             for (let i = 0; i < 5; i++) _lastCfg[i] = resp[i + 1]
             _cfgOk = true
+            _stage = 0
             return
         }
 
-        _lastError = "Unexpected config header: " + resp[0]
+        _cfgOk = false
+        _lastError = "readConfig: unexpected header " + resp[0]
+        finishFailSafe()
     }
 
-    /**
-     * Send a string (newline-delimited by default).
-     */
     //% block="send string %msg"
     //% weight=50
     export function sendString(msg: string): void {
@@ -262,9 +268,6 @@ namespace cansat {
         serial.writeString(msg)
     }
 
-    /**
-     * On receive string (newline-delimited).
-     */
     //% block="on receive string"
     //% weight=49
     export function onReceiveString(handler: (msg: string) => void): void {
@@ -272,18 +275,12 @@ namespace cansat {
         installReceiverOnce()
     }
 
-    /**
-     * Switch module transmission mode used by "send string".
-     */
     //% block="set tx mode %mode"
     //% weight=80
     export function setTxMode(mode: TxMode): void {
         _fixedMode = (mode == TxMode.Fixed)
     }
 
-    /**
-     * Route serial to LoRa module (P14 TX, P15 RX).
-     */
     //% block="serial to LoRa"
     //% weight=70
     export function serialToLoRa(): void {
@@ -291,9 +288,6 @@ namespace cansat {
         serial.redirect(LORA_TX, LORA_RX, baudRateFromUart(_currentUart))
     }
 
-    /**
-     * Route serial to USB (debug prints).
-     */
     //% block="serial to USB"
     //% weight=69
     export function serialToUSB(): void {
@@ -314,6 +308,12 @@ namespace cansat {
     //% advanced=true
     export function lastError(): string {
         return _lastError
+    }
+
+    //% block="debug stage"
+    //% advanced=true
+    export function debugStage(): number {
+        return _stage
     }
 
     //% block="config ADDH"
@@ -363,6 +363,13 @@ namespace cansat {
     // ---------------------------------------------------------------------
     // Internal helpers
     // ---------------------------------------------------------------------
+
+    function finishFailSafe(): void {
+        // Guarantee a non-empty error whenever configOk is false.
+        if (!_cfgOk && _lastError == "") {
+            _lastError = "Failed (stage " + _stage + ")"
+        }
+    }
 
     function ensureInit(): void {
         if (!_inited) init()
@@ -419,7 +426,12 @@ namespace cansat {
             return null
         }
 
-        return readBytesWithTimeout(6, 1000)
+        const resp = readBytesWithTimeout(6, 1200)
+        if (!resp || resp.length == 0) {
+            if (_lastError == "") _lastError = "No bytes received from module"
+            return null
+        }
+        return resp
     }
 
     function readBytesWithTimeout(n: number, timeoutMs: number): Buffer {
