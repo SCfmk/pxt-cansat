@@ -120,7 +120,7 @@ namespace cansat {
         pins.setPull(PIN_AUX, PinPullMode.PullUp)
 
         _currentUart = UartBaud.B9600
-        serial.redirect(LORA_RX, LORA_TX, baudRateFromUart(_currentUart))
+        serial.redirect(LORA_TX, LORA_RX, baudRateFromUart(_currentUart))
 
         basic.pause(200)
         waitAuxHigh(4000)
