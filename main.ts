@@ -78,8 +78,8 @@ namespace cansat {
     const PIN_M0 = DigitalPin.P9
     const PIN_M1 = DigitalPin.P8
     const PIN_AUX = DigitalPin.P16
-    const LORA_TX = SerialPin.P14
-    const LORA_RX = SerialPin.P15
+    const LORA_TX = SerialPin.P15
+    const LORA_RX = SerialPin.P14
 
     // ---------------------------------------------------------------------
     // Internal state
