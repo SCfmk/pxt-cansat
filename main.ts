@@ -78,6 +78,8 @@ namespace cansat {
     const PIN_M0 = DigitalPin.P9
     const PIN_M1 = DigitalPin.P8
     const PIN_AUX = DigitalPin.P16
+
+    // NOTE: Swapped to match your PCB wiring
     const LORA_TX = SerialPin.P15
     const LORA_RX = SerialPin.P14
 
@@ -101,10 +103,6 @@ namespace cansat {
     // Status
     let _lastError = ""
     let _cfgOk = false
-
-    // Debug stage (helps pinpoint where it fails)
-    // 0 = idle, 10+ = applyConfig stages, 20+ = readConfig stages
-    let _stage = 0
 
     // ---------------------------------------------------------------------
     // Public blocks (NOT Advanced): init, config, send/receive, tx mode, serial switching
@@ -131,7 +129,6 @@ namespace cansat {
         _inited = true
         _lastError = ""
         _cfgOk = true
-        _stage = 0
     }
 
     //% block="apply config ADDH %addh ADDL %addl channel %ch power %p uart %uart parity %parity air %air tx mode %mode"
@@ -146,7 +143,6 @@ namespace cansat {
         ensureInit()
         _lastError = ""
         _cfgOk = false
-        _stage = 10
 
         const sped = ((parity & 0x03) << 6) | ((uart & 0x07) << 3) | (air & 0x07)
 
@@ -154,7 +150,6 @@ namespace cansat {
         option |= (p & 0x03)
         if (mode == TxMode.Fixed) option |= (1 << 2)
 
-        _stage = 11
         if (!enterConfigMode()) {
             if (_lastError == "") _lastError = "applyConfig: enter config mode failed"
             exitConfigMode()
@@ -162,7 +157,6 @@ namespace cansat {
             return
         }
 
-        _stage = 12
         const frame = pins.createBuffer(6)
         frame[0] = 0xC0
         frame[1] = addh & 0xff
@@ -172,7 +166,6 @@ namespace cansat {
         frame[5] = option & 0xff
         serial.writeBuffer(frame)
 
-        _stage = 13
         if (!waitAuxHigh(4000)) {
             _lastError = "applyConfig: AUX timeout after write"
             exitConfigMode()
@@ -181,7 +174,6 @@ namespace cansat {
         }
 
         // Verify by reading parameters back (more reliable than echo)
-        _stage = 14
         const readback = readParamsWhileInConfigMode()
         exitConfigMode()
 
@@ -192,7 +184,6 @@ namespace cansat {
             _cfgOk = true
             _currentUart = uart
             serial.redirect(LORA_TX, LORA_RX, baudRateFromUart(_currentUart))
-            _stage = 0
             return
         }
 
@@ -207,9 +198,7 @@ namespace cansat {
         ensureInit()
         _lastError = ""
         _cfgOk = false
-        _stage = 20
 
-        _stage = 21
         if (!enterConfigMode()) {
             if (_lastError == "") _lastError = "readConfig: enter config mode failed"
             exitConfigMode()
@@ -217,11 +206,9 @@ namespace cansat {
             return
         }
 
-        _stage = 22
         const resp = readParamsWhileInConfigMode()
         exitConfigMode()
 
-        _stage = 23
         if (!resp || resp.length < 6) {
             if (_lastError == "") _lastError = "readConfig: no/short response"
             finishFailSafe()
@@ -232,7 +219,6 @@ namespace cansat {
             _lastCfg = pins.createBuffer(5)
             for (let i = 0; i < 5; i++) _lastCfg[i] = resp[i + 1]
             _cfgOk = true
-            _stage = 0
             return
         }
 
@@ -310,12 +296,6 @@ namespace cansat {
         return _lastError
     }
 
-    //% block="debug stage"
-    //% advanced=true
-    export function debugStage(): number {
-        return _stage
-    }
-
     //% block="config ADDH"
     //% advanced=true
     export function cfgADDH(): number {
@@ -367,7 +347,7 @@ namespace cansat {
     function finishFailSafe(): void {
         // Guarantee a non-empty error whenever configOk is false.
         if (!_cfgOk && _lastError == "") {
-            _lastError = "Failed (stage " + _stage + ")"
+            _lastError = "Failed"
         }
     }
 
@@ -412,7 +392,7 @@ namespace cansat {
     }
 
     function readParamsWhileInConfigMode(): Buffer {
-        // Clear any pending input
+        // Clear any pending input (can be empty)
         serial.readString()
 
         const cmd = pins.createBuffer(3)
