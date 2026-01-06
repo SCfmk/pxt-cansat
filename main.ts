@@ -15,6 +15,7 @@ namespace cansat {
     let _rxHandler: (msg: string) => void = null
     let _fixedMode = false
     let _useLineMode = true
+    let UartBaud = UartBaud.B9600
 
     // Cache of last known config payload (5 bytes): ADDH, ADDL, CHAN, SPED, OPTION
     let _lastCfg: Buffer = null
